@@ -18,15 +18,15 @@ LOGDIR=/kafka-logs
 DATADIR=/zookeeper
 
 execute_remote_cmd() {
-    # $1 is the ip
-    # $2 is the cmd
-    # $3 is sudo
+    ip="$1"
+    cmd="$2"
+    sudo="$3"
 
-    if [[ -z "$3" ]]; then
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -i ${CREDFILE} $USERNAME@"$1" "$2"
+    if [[ -z "${sudo}" ]]; then
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -i ${CREDFILE} $USERNAME@${ip} "${cmd}"
     else
         # sudo
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -i ${CREDFILE} $USERNAME@"$1" -t -t "$2"
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -i ${CREDFILE} $USERNAME@${ip} -t -t "${cmd}"
     fi
 }
 
@@ -115,6 +115,7 @@ configure_kafka_server_settings() {
     # kafka server
     # broker.id=0
     # listeners=PLAINTEXT://:9092
+    # advertised.listeners=PLAINTEXT://<public-ip>:9092
     # log.dirs=/kafka-logs
     # num.partitions=3
     # default.replication.factor=3
@@ -124,12 +125,14 @@ configure_kafka_server_settings() {
 
     id=$1
     ip=$2
-    zk_connect=$3
+    pub_ip=$3
+    zk_connect=$4
 
     sed -i "" "s#broker.id=.*#broker.id=${id}#g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
     sed -i "" "s/#host.name=.*/host.name=${ip}/g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
     sed -i "" "s/host.name=.*/host.name=${ip}/g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
     sed -i "" "s/^#listeners/listeners/g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
+    # sed -i "" "s@^#advertised.listeners=PLAINTEXT://your.host.name:9092@advertised.listeners=PLAINTEXT://${ip}:9092@g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
 
     sed -i "" "s#log.dirs=.*#log.dirs=${LOGDIR}#g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
     sed -i "" "s#zookeeper.connect=.*#zookeeper.connect=${zk_connect}#g" "${KAFKA_PACKAGE_DIR}/config/server.properties"
@@ -161,7 +164,7 @@ deploy_kafka_package() {
         pub_ip=`echo $ip | awk -F\| '{print $1}'`
         private_ip=`echo $ip | awk -F\| '{print $2}'`
 
-        configure_kafka_server_settings "${id}" "${private_ip}" "${zk_connect_str}"
+        configure_kafka_server_settings "${id}" "${private_ip}" "${pub_ip}" "${zk_connect_str}"
         ((id++))
         print_msg "Deploy kafka package to ${pub_ip}"
         rsync -raz -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -i $CREDFILE" --exclude=macos --delete $KAFKA_PACKAGE_DIR $USERNAME@$pub_ip:~/
@@ -224,6 +227,7 @@ start_server() {
 
 start_kafka_cluster() {
     start_server "zookeeper" "cd $KAFKA_PACKAGE_DIR; export KAFKA_HEAP_OPTS=\"$KAFKA_HEAP_OPTS\"; nohup ./bin/zookeeper-server-start.sh config/zookeeper.properties > zookeeper_start.log 2>&1 &" "$1"
+    sleep 10
     start_server "kafka" "cd $KAFKA_PACKAGE_DIR; export KAFKA_HEAP_OPTS=\"$KAFKA_HEAP_OPTS\"; nohup ./bin/kafka-server-start.sh config/server.properties > kafka_start.log 2>&1 &" "$1"
 }
 
@@ -276,6 +280,21 @@ list_kafka_topics() {
 
         print_msg "List kafka topics"
         execute_remote_cmd "${ip}" "./$KAFKA_PACKAGE_DIR/bin/kafka-topics.sh --zookeeper $zk_connect --list"
+        break
+    done
+}
+
+describe_kafka_topic() {
+    topic="$1"
+    zk_connect=`get_zookeeper_connect_setting`
+    for ip in `cat ${LAB} | grep -v \# | awk -F\| '{print $1}'`
+    do
+        if [ "${ip}" == "" ]; then
+            continue
+        fi
+
+        print_msg "Describe kafka ${topic}"
+        execute_remote_cmd "${ip}" "./$KAFKA_PACKAGE_DIR/bin/kafka-topics.sh --zookeeper $zk_connect --describe --topic ${topic}"
         break
     done
 }
@@ -360,7 +379,7 @@ ips=
 fix=
 topic=
 
-while getopts "hisropdcln" OPTION
+while getopts "hsropdlnc:i:" OPTION
 do
     case $OPTION in
         h)
